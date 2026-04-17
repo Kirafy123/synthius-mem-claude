@@ -1,0 +1,16 @@
+# Memory Index
+
+## Global User Memory (Six-Domain Model)
+
+Based on the Synthius-Mem paper (arXiv:2604.11563). Load index on session start, retrieve domains on demand.
+
+- [Preferences](domains/03-preferences/_index.md) — Interaction style, habits, decision preferences
+- [Biography](domains/01-biography/_index.md) — Identity, roles, background
+- [Experiences](domains/02-experiences/_index.md) — Important events and milestones
+- [Social Circle](domains/04-social-circle/_index.md) — Team, collaborators, relationships
+- [Work](domains/05-work/_index.md) — Projects, skills, tools
+- [Psychometrics](domains/06-psychometrics/_index.md) — Thinking patterns and cognitive frameworks
+
+## Project Memory (per-project, isolated)
+
+_No project memories yet. When you start a project, its memory will be created here._
