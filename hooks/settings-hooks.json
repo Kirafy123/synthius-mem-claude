@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node -e \"try{const fs=require('fs'),path='MEMORY_PATH_PLACEHOLDER/.pending',files=fs.existsSync(path)?fs.readdirSync(path).filter(f=>f.startsWith('pending-')):[];if(files.length>0){let log='';files.forEach(f=>{const c=fs.readFileSync(path+'/'+f,'utf8');const m=c.match(/^---[\\s\\S]*?---/);const domain=(m&&m[0].match(/domain:\\s*(\\S+)/))?m[0].match(/domain:\\s*(\\S+)/)[1]:'unknown';log+='[SessionEnd] '+f+' -> '+domain+'\\n'});fs.appendFileSync('MEMORY_PATH_PLACEHOLDER/consolidation-log.md','\\n## SessionEnd '+new Date().toISOString().slice(0,10)+'\\n\\nPending entries:\\n'+log);fs.writeFileSync(path+'/_last-consolidation.json',JSON.stringify({time:new Date().toISOString(),pendingFiles:files}),'utf8')}else{console.log(JSON.stringify({systemMessage:'No pending memory entries to consolidate.'}))}}catch(e){console.log(JSON.stringify({systemMessage:'Memory consolidation check skipped: '+e.message}))}\" 2>/dev/null || true",
+            "command": "node \"MEMORY_PATH_PLACEHOLDER/scripts/session-end.js\" \"MEMORY_PATH_PLACEHOLDER\" 2>/dev/null || true",
             "statusMessage": "Consolidating memory..."
           }
         ]

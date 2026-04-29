@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Synthius-Mem for Claude Code — Install Script (macOS / Linux)
-# Usage: curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/synthius-mem-claude/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/Kirafy123/synthius-mem-claude/main/install.sh | bash
 #   or:  bash install.sh
 
 set -e
@@ -8,7 +8,6 @@ set -e
 echo "=== Synthius-Mem for Claude Code — Installer ==="
 echo ""
 
-# Detect Claude Code config directory
 CLAUDE_DIR="$HOME/.claude"
 MEMORY_DIR=""
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
@@ -21,23 +20,16 @@ fi
 
 echo "✓ Found Claude Code directory at $CLAUDE_DIR"
 
-# Find or create memory directory
-# Look for existing project memory directories
-EXISTING_MEM=$(find "$CLAUDE_DIR/projects" -maxdepth 1 -type d -name "memory" 2>/dev/null | head -1)
+# Find existing memory dir: look for any projects/<id>/memory/ that has a domains/ subdir
+EXISTING_MEM=$(find "$CLAUDE_DIR/projects" -mindepth 2 -maxdepth 2 -type d -name "memory" 2>/dev/null | while read d; do
+  [ -d "$d/domains" ] && echo "$d" && break
+done | head -1)
 
 if [ -n "$EXISTING_MEM" ]; then
   MEMORY_DIR="$EXISTING_MEM"
   echo "✓ Found existing memory directory: $MEMORY_DIR"
 else
-  # Create in first project directory found, or create a dedicated one
-  FIRST_PROJECT=$(find "$CLAUDE_DIR/projects" -maxdepth 1 -type d -not -name "C--Users-Administrator" 2>/dev/null | head -1)
-  if [ -n "$FIRST_PROJECT" ]; then
-    MEMORY_DIR="$FIRST_PROJECT/memory"
-  else
-    # Create a dedicated project for memory
-    MEMORY_DIR="$CLAUDE_DIR/projects/synthius-mem/memory"
-    mkdir -p "$MEMORY_DIR"
-  fi
+  MEMORY_DIR="$CLAUDE_DIR/projects/synthius-mem/memory"
   mkdir -p "$MEMORY_DIR"
   echo "✓ Created memory directory: $MEMORY_DIR"
 fi
@@ -48,29 +40,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo ""
 echo "Installing memory domains..."
 DOMAINS=("01-biography" "02-experiences" "03-preferences" "04-social-circle" "05-work" "06-psychometrics")
+TODAY=$(date +%Y-%m-%d)
+
 for d in "${DOMAINS[@]}"; do
   mkdir -p "$MEMORY_DIR/domains/$d"
-  if [ -f "$SCRIPT_DIR/memory/domains/$d/_index.md" ]; then
-    # Replace placeholder date
-    TODAY=$(date +%Y-%m-%d)
-    sed "s/PLACEHOLDER_DATE/$TODAY/g" "$SCRIPT_DIR/memory/domains/$d/_index.md" > "$MEMORY_DIR/domains/$d/_index.md"
+  DEST="$MEMORY_DIR/domains/$d/_index.md"
+  if [ ! -f "$DEST" ]; then
+    sed "s/PLACEHOLDER_DATE/$TODAY/g" "$SCRIPT_DIR/memory/domains/$d/_index.md" > "$DEST"
     echo "  ✓ domains/$d/_index.md"
+  else
+    echo "  ⊘ domains/$d/_index.md (already exists, skipping)"
   fi
 done
 
 # Copy support files
 mkdir -p "$MEMORY_DIR/.pending" "$MEMORY_DIR/archive"
 
-for f in consolidation-log.md; do
-  if [ ! -f "$MEMORY_DIR/$f" ]; then
-    cp "$SCRIPT_DIR/memory/$f" "$MEMORY_DIR/$f"
-    echo "  ✓ $f"
-  else
-    echo "  ⊘ $f (already exists, skipping)"
-  fi
-done
+if [ ! -f "$MEMORY_DIR/consolidation-log.md" ]; then
+  cp "$SCRIPT_DIR/memory/consolidation-log.md" "$MEMORY_DIR/consolidation-log.md"
+  echo "  ✓ consolidation-log.md"
+else
+  echo "  ⊘ consolidation-log.md (already exists, skipping)"
+fi
 
-# Create MEMORY.md from template if it doesn't exist
 if [ ! -f "$MEMORY_DIR/MEMORY.md" ]; then
   cp "$SCRIPT_DIR/memory/MEMORY.md.template" "$MEMORY_DIR/MEMORY.md"
   echo "  ✓ MEMORY.md (created from template)"
@@ -78,30 +70,28 @@ else
   echo "  ⊘ MEMORY.md (already exists, preserving)"
 fi
 
+# Copy consolidation script
+mkdir -p "$MEMORY_DIR/scripts"
+cp "$SCRIPT_DIR/scripts/session-end.js" "$MEMORY_DIR/scripts/session-end.js"
+echo "  ✓ scripts/session-end.js"
+
 # Install skill
-SKILL_DEST="$CLAUDE_DIR/skills/memory-ops.md"
-if [ -f "$SKILL_DEST" ]; then
-  echo "  ⊘ memory-ops.md skill (already exists, skipping)"
-else
-  mkdir -p "$CLAUDE_DIR/skills"
-  cp "$SCRIPT_DIR/.claude/skills/memory-ops.md" "$SKILL_DEST"
-  echo "  ✓ memory-ops.md skill"
-fi
+mkdir -p "$CLAUDE_DIR/skills"
+cp "$SCRIPT_DIR/.claude/skills/memory-ops.md" "$CLAUDE_DIR/skills/memory-ops.md"
+echo "  ✓ memory-ops.md skill (installed/updated)"
 
 # Merge hooks into settings.json
 echo ""
 echo "Installing hooks..."
 if [ -f "$SETTINGS_FILE" ]; then
-  # Use node to merge hooks safely
   node -e "
     const fs = require('fs');
     const settingsPath = '$SETTINGS_FILE';
     const hooksPath = '$SCRIPT_DIR/hooks/settings-hooks.json';
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
-
-    // Replace placeholder with actual memory dir
     const memDir = '$MEMORY_DIR';
+
     for (const [event, entries] of Object.entries(hooks.hooks)) {
       if (!settings.hooks) settings.hooks = {};
       settings.hooks[event] = entries.map(entry => {
@@ -124,10 +114,10 @@ echo "=== Installation Complete ==="
 echo ""
 echo "Memory directory: $MEMORY_DIR"
 echo ""
-echo "To verify everything works:"
+echo "To verify:"
 echo "  node $SCRIPT_DIR/test/test-memory.js"
 echo ""
-echo "Next time you start Claude Code, the SessionStart hook will automatically"
-echo "load your memory index. Memories captured during sessions will be"
-echo "consolidated at session end."
+echo "SessionStart loads your memory index automatically."
+echo "SessionEnd writes pending captures to domain files automatically."
+echo "Run 'consolidate' in a session to do semantic dedup/merge."
 echo ""

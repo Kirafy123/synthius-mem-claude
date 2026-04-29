@@ -1,5 +1,5 @@
 # Synthius-Mem for Claude Code — Install Script (Windows PowerShell)
-# Usage: irm https://raw.githubusercontent.com/YOUR_USERNAME/synthius-mem-claude/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/Kirafy123/synthius-mem-claude/main/install.ps1 | iex
 #   or:  powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = "Stop"
@@ -22,12 +22,15 @@ Write-Host "Found Claude Code directory at $ClaudeDir" -ForegroundColor Green
 $SettingsFile = Join-Path $ClaudeDir "settings.json"
 
 # Find or create memory directory
+# Search all levels under projects/ for an existing Synthius-Mem memory dir
+# (Claude Code project dirs are 1 level deep: projects/<encoded-path>/memory/)
 $MemoryDir = $null
 $ProjectsDir = Join-Path $ClaudeDir "projects"
 
 if (Test-Path $ProjectsDir) {
-  # Look for existing memory directories
-  $ExistingMem = Get-ChildItem -Path $ProjectsDir -Recurse -Directory -Filter "memory" -Depth 1 -ErrorAction SilentlyContinue | Select-Object -First 1
+  $ExistingMem = Get-ChildItem -Path $ProjectsDir -Recurse -Directory -Filter "memory" -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path (Join-Path $_.FullName "domains") } |
+    Select-Object -First 1
   if ($ExistingMem) {
     $MemoryDir = $ExistingMem.FullName
     Write-Host "Found existing memory directory: $MemoryDir" -ForegroundColor Green
@@ -35,7 +38,6 @@ if (Test-Path $ProjectsDir) {
 }
 
 if (-not $MemoryDir) {
-  # Create in a new dedicated project
   $MemoryDir = Join-Path $ClaudeDir "projects\synthius-mem\memory"
   New-Item -ItemType Directory -Path $MemoryDir -Force | Out-Null
   Write-Host "Created memory directory: $MemoryDir" -ForegroundColor Green
@@ -92,16 +94,20 @@ if (-not (Test-Path $MemoryIndexFile)) {
   Write-Host "  MEMORY.md (already exists, preserving)" -ForegroundColor Yellow
 }
 
+# Copy consolidation script to memory/scripts/
+$ScriptsDestDir = Join-Path $MemoryDir "scripts"
+if (-not (Test-Path $ScriptsDestDir)) { New-Item -ItemType Directory -Path $ScriptsDestDir -Force | Out-Null }
+$SessionEndSrc  = Join-Path $ScriptDir "scripts\session-end.js"
+$SessionEndDest = Join-Path $ScriptsDestDir "session-end.js"
+Copy-Item $SessionEndSrc $SessionEndDest -Force
+Write-Host "  scripts\session-end.js" -ForegroundColor Green
+
 # Install skill
 $SkillDest = Join-Path $ClaudeDir "skills\memory-ops.md"
-if (-not (Test-Path $SkillDest)) {
-  $SkillsDir = Join-Path $ClaudeDir "skills"
-  if (-not (Test-Path $SkillsDir)) { New-Item -ItemType Directory -Path $SkillsDir -Force | Out-Null }
-  Copy-Item (Join-Path $ScriptDir ".claude\skills\memory-ops.md") $SkillDest
-  Write-Host "  memory-ops.md skill" -ForegroundColor Green
-} else {
-  Write-Host "  memory-ops.md skill (already exists, skipping)" -ForegroundColor Yellow
-}
+$SkillsDir = Join-Path $ClaudeDir "skills"
+if (-not (Test-Path $SkillsDir)) { New-Item -ItemType Directory -Path $SkillsDir -Force | Out-Null }
+Copy-Item (Join-Path $ScriptDir ".claude\skills\memory-ops.md") $SkillDest -Force
+Write-Host "  memory-ops.md skill (installed/updated)" -ForegroundColor Green
 
 # Merge hooks into settings.json
 Write-Host ""
@@ -139,10 +145,10 @@ Write-Host "=== Installation Complete ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Memory directory: $MemoryDir"
 Write-Host ""
-Write-Host "To verify everything works:"
+Write-Host "To verify:"
 Write-Host "  node $(Join-Path $ScriptDir 'test\test-memory.js')"
 Write-Host ""
-Write-Host "Next time you start Claude Code, the SessionStart hook will automatically"
-Write-Host "load your memory index. Memories captured during sessions will be"
-Write-Host "consolidated at session end."
+Write-Host "SessionStart loads your memory index automatically."
+Write-Host "SessionEnd writes pending captures to domain files automatically."
+Write-Host "Run 'consolidate' in a session to do semantic dedup/merge."
 Write-Host ""

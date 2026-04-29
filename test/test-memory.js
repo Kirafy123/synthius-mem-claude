@@ -6,18 +6,32 @@
  * Usage: node test/test-memory.js
  */
 
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
+const os   = require('os');
 const { execSync } = require('child_process');
 
-// Allow overriding base path via environment variable (for installed tests)
-const BASE = process.env.MEMORY_TEST_BASE ||
-  'C:/Users/Administrator/.claude/projects/C--Users-Administrator/memory';
+const HOME       = os.homedir().replace(/\\/g, '/');
+const CLAUDE_DIR = `${HOME}/.claude`;
+
+function detectMemoryDir() {
+  const projectsDir = path.join(CLAUDE_DIR, 'projects');
+  if (!fs.existsSync(projectsDir)) return null;
+  for (const proj of fs.readdirSync(projectsDir)) {
+    const memPath  = path.join(projectsDir, proj, 'memory');
+    const domPath  = path.join(memPath, 'domains');
+    if (fs.existsSync(domPath)) return memPath.replace(/\\/g, '/');
+  }
+  return null;
+}
+
+const BASE         = process.env.MEMORY_TEST_BASE  || detectMemoryDir() || `${CLAUDE_DIR}/projects/synthius-mem/memory`;
+const SKILL_PATH   = process.env.SKILL_TEST_PATH   || `${CLAUDE_DIR}/skills/memory-ops.md`;
+const SETTINGS_PATH= process.env.SETTINGS_TEST_PATH|| `${CLAUDE_DIR}/settings.json`;
+
 const DOMAINS = ['01-biography', '02-experiences', '03-preferences', '04-social-circle', '05-work', '06-psychometrics'];
 const PENDING = path.join(BASE, '.pending');
 const ARCHIVE = path.join(BASE, 'archive');
-const SKILL_PATH = process.env.SKILL_TEST_PATH || 'C:/Users/Administrator/.claude/skills/memory-ops.md';
-const SETTINGS_PATH = process.env.SETTINGS_TEST_PATH || 'C:/Users/Administrator/.claude/settings.json';
 
 let passed = 0, failed = 0, total = 0;
 const failures = [];
@@ -83,11 +97,15 @@ test('SessionStart command references MEMORY.md', () => {
   assert(cmd.includes('additionalContext'), 'no additionalContext output');
 });
 
-test('SessionEnd command references pending and consolidation-log', () => {
+test('SessionEnd command references session-end.js script', () => {
   const s = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
   const cmd = s.hooks.SessionEnd[0].hooks[0].command;
-  assert(cmd.includes('.pending'), 'no .pending reference');
-  assert(cmd.includes('consolidation-log'), 'no consolidation-log reference');
+  assert(cmd.includes('session-end.js'), 'no session-end.js reference');
+  // Also verify the consolidation script exists at the referenced path
+  const scriptMatch = cmd.match(/node\s+"([^"]+session-end\.js)"/);
+  if (scriptMatch) {
+    assert(fs.existsSync(scriptMatch[1]), `session-end.js not found at ${scriptMatch[1]}`);
+  }
 });
 
 // ============================================================
