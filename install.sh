@@ -74,6 +74,8 @@ fi
 mkdir -p "$MEMORY_DIR/scripts"
 cp "$SCRIPT_DIR/scripts/session-end.js" "$MEMORY_DIR/scripts/session-end.js"
 echo "  ✓ scripts/session-end.js"
+cp "$SCRIPT_DIR/scripts/session-start.js" "$MEMORY_DIR/scripts/session-start.js"
+echo "  ✓ scripts/session-start.js"
 
 # Install skill
 mkdir -p "$CLAUDE_DIR/skills"

@@ -102,6 +102,11 @@ $SessionEndDest = Join-Path $ScriptsDestDir "session-end.js"
 Copy-Item $SessionEndSrc $SessionEndDest -Force
 Write-Host "  scripts\session-end.js" -ForegroundColor Green
 
+$SessionStartSrc  = Join-Path $ScriptDir "scripts\session-start.js"
+$SessionStartDest = Join-Path $ScriptsDestDir "session-start.js"
+Copy-Item $SessionStartSrc $SessionStartDest -Force
+Write-Host "  scripts\session-start.js" -ForegroundColor Green
+
 # Install skill
 $SkillDest = Join-Path $ClaudeDir "skills\memory-ops.md"
 $SkillsDir = Join-Path $ClaudeDir "skills"

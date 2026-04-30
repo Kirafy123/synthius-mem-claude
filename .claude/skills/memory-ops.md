@@ -14,28 +14,60 @@ Based on: Gadzhiev & Kislov, "Synthius-Mem: Brain-Inspired Hallucination-Resista
 ## Two-Tier Consolidation
 
 **Tier 1 — Automatic (SessionEnd hook)**
-Runs `session-end.js` at every session end. Mechanically appends each pending capture to its domain `_index.md` and deletes the pending file. No LLM needed, no semantic judgment. Every capture is preserved — nothing is lost.
+Runs `session-end.js` at every session end. For each pending file: checks same-category entries in the domain for near-duplicates (Jaccard ≥ 80%) and updates the existing entry instead of appending; otherwise appends as a new entry. No LLM needed.
 
 **Tier 2 — Manual (consolidate action)**
-Semantic cleanup: merge near-duplicate entries, remove contradictions, refine titles, archive stale entries. Run this when domain files grow noisy (roughly weekly, or after a heavy session).
+Semantic cleanup: merge near-duplicate entries, remove contradictions, refine titles, archive stale/expired entries. Run this when domain files grow noisy (roughly weekly, or after a heavy session).
 
 ## Actions
 
 ### capture — Write a New Memory
 
-**When to call capture (MUST trigger without being asked):**
-- User expresses a preference or aversion: "I like X", "don't do Y", "I prefer Z"
-- User gives feedback on Claude's behavior — positive or negative
-- User shares identity or background: role, location, skills, years of experience
-- User mentions a project, tool, or workflow they use regularly
-- User reveals a thinking pattern or decision framework
-- User mentions team members, collaborators, or stakeholders by name/role
-- User shares an important milestone or experience
-- Any information that would change how you'd respond in a future session
+**Three-tier trigger structure — evaluate in order, stop at first match:**
 
-**Do not wait for the user to say "remember this."** If the information fits a domain, capture it.
+#### Tier 1: Explicit Commands (highest priority — always capture, no judgment)
 
-**How**: Write to `memory/.pending/` with naming `pending-YYYYMMDD-HHMM.md`.
+中文信号：记住、记一下、记下来、下次注意、别忘了、这是个教训、以后都要
+English signals: "remember this", "note that", "don't forget", "lesson learned", "always do"
+
+Rules:
+- **Never skip** — user intent overrides all other filters
+- Always `strength: high`
+- If a relevant entry already exists in the memory index: **update** it, don't create a duplicate
+- If the user qualifies with 暂时 / 这次 / for now / temporarily: add `expires: YYYY-MM` field
+- Domain: infer from content if the user doesn't state it (see table in Tier 2)
+
+#### Tier 2: Clear Signals (capture without being asked)
+
+| Signal type | Domain | Category hint |
+|---|---|---|
+| Preference / aversion / working habit | preferences | communication style / workflow |
+| Hard constraint: 不能 / 必须 / 只能 / can't / must | preferences | hard-constraint |
+| Style or process feedback on Claude's behavior | preferences | feedback |
+| Role / background / expertise depth in a specific area | biography | role / expertise |
+| Ongoing project, tool, or workflow | work | project / tool |
+| Thinking pattern or decision framework | psychometrics | framework |
+| Team member or collaborator named | social-circle | — |
+| Milestone or important experience | experiences | milestone |
+| Negative experience / anti-pattern: 试过不行 / 被坑过 / we tried X and it failed | experiences | anti-pattern |
+
+**Do NOT capture:**
+- Content corrections: "this answer is wrong", "that function doesn't exist"
+- Current-task-only state: "we're now on step 3", "use tabs just for this file"
+- Info already in the memory index with nothing new to add
+- Incidental one-off mentions with no signal of recurrence
+
+#### Tier 3: Implicit Signals (use judgment)
+
+Apply permanence × impact:
+- High permanence + High impact → capture
+- High permanence + Low impact → capture only if confirmed (appears 2+ times this session)
+- Low permanence + High impact → capture with `expires: YYYY-MM`
+- Low permanence + Low impact → skip
+
+**How**: Write to `memory/.pending/` with naming `pending-YYYYMMDDHHMMSS.md` (seconds precision avoids overwrite when multiple captures happen in the same minute).
+
+After writing the pending file: if `strength: high`, also update the domain's summary line in `MEMORY.md` to reflect the new key fact (one-line edit, keep it under ~60 chars).
 
 **Format**:
 ```markdown
@@ -43,19 +75,20 @@ Semantic cleanup: merge near-duplicate entries, remove contradictions, refine ti
 action: capture
 domain: preferences|biography|experiences|social-circle|work|psychometrics
 strength: high|medium|low
-date: 2026-04-29
+date: YYYY-MM-DD
+expires: YYYY-MM
 ---
 
-**Content**: Concise description of the memory (one sentence, specific)
+**Content**: Concise description of the memory (one to two sentences; preserve key qualifiers and conditions)
 **Original Quote**: "exact words from the conversation"
-**Source Session**: 2026-04-29 / topic
-**Category**: Suggested sub-category (e.g. "communication style", "project context")
+**Source Session**: YYYY-MM-DD / topic
+**Category**: sub-category (e.g. "hard-constraint", "anti-pattern", "communication style")
 ```
 
-**Strength guidelines:**
-- `high`: Core identity, strong stated preferences, repeated patterns
-- `medium`: Useful context, single-mention preferences
-- `low`: Incidental mentions, unconfirmed assumptions
+**Strength rules (objective):**
+- `high`: User explicitly commanded capture OR core identity OR preference confirmed 2+ times this session
+- `medium`: Single clear explicit mention
+- `low`: Inferred from behavior / indirect signal
 
 ### consolidate — Semantic Cleanup (Manual)
 
@@ -67,14 +100,16 @@ node memory/scripts/consolidate.js <memory-path>
 ```
 
 The script handles automatically (no LLM needed):
-- **Auto-merge**: same domain + same Category + word overlap ≥ 75% → merged, loser's quote added to winner's Change History
-- **Archive**: `Strength: low` + not updated in 30+ days → moved to `memory/archive/`
+- **Archive (expired)**: entries with `Expires: YYYY-MM` past current month → `memory/archive/`
+- **Archive (stale)**: `Strength: low` + not updated in 30+ days → `memory/archive/`
+- **Auto-merge**: same domain + same Category + similarity ≥ threshold → merged (threshold: 75% normally, 50% for entries with < 10 tokens)
+- **Trim**: Change History capped at 5 entries, older ones summarized
 - **Flag**: relative time references ("最近", "yesterday", etc.) in content/title
 
 **Step 2 — Review the script's output:**
 
 The script prints only the cases it couldn't resolve deterministically:
-- Same-category pairs with 30%-75% overlap → make a call: same fact or complementary?
+- Same-category pairs with 30%–threshold overlap → make a call: same fact or complementary?
   - Same: merge manually with Edit tool (keep higher-strength entry, append other's quote to Change History)
   - Complementary: add distinct Category suffixes, e.g. `"communication style / brevity"` vs `"communication style / depth"`
 - Entries missing Category field with any overlap → add the Category field, then re-run
@@ -99,26 +134,42 @@ To automate: use the `/schedule` skill to create a weekly recurring task.
 
 ### retrieve — Load Relevant Domain
 
-Based on current task context, decide which domains to load.
+**When to trigger retrieve (mid-session):**
 
-**Retrieval rules:**
-- Communication style / interaction → `03-preferences/_index.md`
-- Code / projects / tools → `05-work/_index.md`
-- Background / identity → `01-biography/_index.md` + `02-experiences/_index.md`
-- Team / collaboration → `04-social-circle/_index.md`
-- Decisions / judgment / frameworks → `06-psychometrics/_index.md`
-- Unsure → read only `MEMORY.md`, load domains as needed
+| Situation | Domains to load |
+|---|---|
+| Before ANY recommendation (always) | preferences — scan for `category: hard-constraint` entries |
+| "How should I / what approach / what framework" | preferences + psychometrics |
+| Code or architecture question | work + preferences |
+| Tool / library / approach choice | work + experiences (check anti-patterns) |
+| User mentions a person by name | social-circle |
+| User background or history unclear | biography + experiences |
+| About to assume user preference or context | check memory first — never guess |
+| Topic shifts significantly | re-evaluate: which domains does the new topic touch? |
 
-**Never load all domain content at once.** Index (~200 tokens) first, domain content on demand.
+**Constraint check — before every recommendation:**
+Scan preferences for `category: hard-constraint` entries. Verify your suggestion doesn't violate them before responding.
+
+**Uncertainty signal:**
+If you're about to make an assumption about the user's preference, background, or project context → load the relevant domain first instead of guessing.
+
+**Loading discipline:**
+1. `_index.md` first (50–100 tokens per domain) — full entry only if index summary suggests direct relevance
+2. Never load all domains at once
+3. If a domain was already loaded earlier in this session, don't reload — use what's in context
+4. Most queries need 2 domains; single-domain retrieval is usually incomplete
 
 ### load-session — Session Startup
 
-Called at session start (handled by SessionStart hook automatically).
+The SessionStart hook handles initialization automatically: MEMORY.md index, retrieval triggers, and capture rules are all injected into context before the first message.
 
-1. Read `MEMORY.md` to get the index
-2. Determine task context from working directory and first user message
-3. Load relevant domain indexes (not full content)
-4. If `.pending/` has files older than 24h, warn the user — the SessionEnd hook may not have run
+**Claude's role at session start:**
+1. Scan the injected index to understand what memory exists
+2. From the working directory and first user message, identify 1–2 most relevant domains
+3. Proactively load those domain `_index.md` files (not full content)
+4. Do not preload all domains — load others on demand as topics emerge
+
+**Mid-session:** as conversation topics shift, apply the retrieval triggers above and load additional domain indexes as needed.
 
 ## Domain Quick Reference
 
@@ -139,7 +190,7 @@ Called at session start (handled by SessionStart hook automatically).
 - **Category**: communication style
 - **Original Quote**: "exact words"
 - **Change History**:
-  - 2026-04-29: Initial capture (pending-20260429-1430.md)
+  - 2026-04-29: Initial capture (pending-20260429143000.md)
   - 2026-04-29: Merged with P-003 (same category, more complete)
 ```
 

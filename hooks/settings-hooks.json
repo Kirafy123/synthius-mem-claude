@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node -e \"try{const f=require('fs').readFileSync('MEMORY_PATH_PLACEHOLDER/MEMORY.md','utf8');console.log(JSON.stringify({hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:'## Memory Index (loaded on SessionStart)\\n\\n'+f.trim()+'\\n\\nMemory loaded. To read a full domain, use the Read tool on the corresponding path.'}}))}catch(e){console.log(JSON.stringify({hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:'Memory index not found. Run the install script to set up Synthius-Mem.'}}))}\" 2>/dev/null || true",
+            "command": "node \"MEMORY_PATH_PLACEHOLDER/scripts/session-start.js\" \"MEMORY_PATH_PLACEHOLDER\" 2>/dev/null || true",
             "statusMessage": "Loading memory index..."
           }
         ]

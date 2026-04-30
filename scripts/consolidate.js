@@ -3,13 +3,22 @@
  * Synthius-Mem — Deterministic Consolidation Script
  *
  * Deterministic actions (no LLM needed):
- *   - Auto-merge: same domain + same Category + word overlap >= MERGE_THRESHOLD
- *   - Archive: Strength: low + not updated in ARCHIVE_DAYS days
+ *   - Archive: entries past their `Expires: YYYY-MM` date
+ *   - Archive: Strength=low + not updated in ARCHIVE_DAYS days
+ *   - Auto-merge: same domain + same Category + similarity >= threshold
+ *     (threshold: 0.75 normally, 0.50 when either entry has < 10 words/chars)
+ *   - Trim Change History: cap at MAX_HISTORY entries, summarize older ones
  *   - Flag: relative time references in content/title
  *
  * Outputs for LLM review:
- *   - Same-category pairs with overlap 30%-MERGE_THRESHOLD (ambiguous — maybe same, maybe complementary)
- *   - Entries missing Category field that have overlap > 0.3 with another entry
+ *   - Same-category pairs with similarity 30%-threshold (ambiguous)
+ *   - Entries missing Category field that have overlap > 0.3
+ *
+ * Fixes vs original:
+ *   - CJK bigram tokenization (Chinese text no longer treated as one token)
+ *   - Dynamic merge threshold for short content
+ *   - Expiry enforcement from `Expires:` field in entry header
+ *   - Change History trimmed to MAX_HISTORY
  *
  * Usage: node consolidate.js <memory-path>
  */
@@ -25,8 +34,11 @@ if (!MEMORY_PATH || !fs.existsSync(MEMORY_PATH)) {
 }
 
 const MERGE_THRESHOLD = 0.75;
+const SHORT_THRESHOLD = 0.50; // used when either entry has < SHORT_WORD_COUNT tokens
+const SHORT_WORD_COUNT = 10;
 const REVIEW_LOW      = 0.30;
 const ARCHIVE_DAYS    = 30;
+const MAX_HISTORY     = 5;
 const RELATIVE_TIME   = /\b(今天|昨天|最近|刚刚|上周|上个月|recently|yesterday|today|last\s+week|last\s+month|a\s+few\s+days\s+ago)\b/i;
 
 const DOMAINS = {
@@ -40,6 +52,7 @@ const DOMAINS = {
 
 const today    = new Date();
 const todayStr = today.toISOString().slice(0, 10);
+const nowYYYYMM = todayStr.slice(0, 7);
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -49,26 +62,53 @@ function daysSince(dateStr) {
   return isNaN(d) ? 9999 : Math.floor((today - d) / 86400000);
 }
 
+// CJK bigrams so Chinese text is tokenized properly
+function tokenize(text) {
+  const tokens = new Set();
+  for (const w of text.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/)) {
+    if (w.length > 1) tokens.add(w);
+  }
+  for (const seg of (text.match(/[一-鿿]+/g) || [])) {
+    for (let i = 0; i < seg.length - 1; i++) tokens.add(seg[i] + seg[i + 1]);
+  }
+  return tokens;
+}
+
+function tokenCount(text) {
+  const ascii = text.toLowerCase().split(/\s+/).filter(w => w.length > 1).length;
+  const cjk   = (text.match(/[一-鿿]/g) || []).length;
+  return ascii + cjk;
+}
+
 function jaccardSimilarity(a, b) {
-  const tok  = t => new Set(t.toLowerCase().replace(/[^\w\s一-鿿]/g, ' ').split(/\s+/).filter(w => w.length > 1));
-  const setA = tok(a), setB = tok(b);
-  // Both empty = unknown, not identical — treat as 0 to avoid false positives
-  if (!setA.size || !setB.size) return 0;
+  const sa = tokenize(a), sb = tokenize(b);
+  if (!sa.size || !sb.size) return 0;
   let inter = 0;
-  for (const w of setA) if (setB.has(w)) inter++;
-  return inter / (setA.size + setB.size - inter);
+  for (const w of sa) if (sb.has(w)) inter++;
+  return inter / (sa.size + sb.size - inter);
+}
+
+// Lower threshold for short entries to catch paraphrased duplicates
+function getMergeThreshold(a, b) {
+  return Math.min(tokenCount(a), tokenCount(b)) < SHORT_WORD_COUNT
+    ? SHORT_THRESHOLD
+    : MERGE_THRESHOLD;
 }
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
 function parseFrontmatter(content) {
   const m = content.match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n?)([\s\S]*)$/);
-  return m ? { front: m[1], body: m[2] } : { front: '', body: content };
+  if (!m) return { front: '', preamble: '', body: content };
+  const afterFront = m[2];
+  const firstEntry = afterFront.search(/^### /m);
+  const preamble   = firstEntry > 0 ? afterFront.slice(0, firstEntry) : '';
+  const body       = firstEntry >= 0 ? afterFront.slice(firstEntry) : afterFront;
+  return { front: m[1], preamble, body };
 }
 
 function parseEntries(body) {
   const entries = [];
-  // Split on lines starting with "### "
   const chunks  = body.split(/\n(?=### )/);
 
   for (const chunk of chunks) {
@@ -77,16 +117,16 @@ function parseEntries(body) {
 
     const lines  = trimmed.split('\n');
     const header = lines[0];
-    // Support both English [Strength|Updated|Source] and Chinese [强度|更新|来源] label formats
-    // Use [^\s|]+ for strength value to match Chinese (高/中/低) and English (high/medium/low)
-    const m      = header.match(/^### ([A-Z]+-\d+)\s+(.+?)\s+\[[^:]+:\s*([^\s|]+)\s*\|[^:]+:\s*([\d-]+)\s*\|[^:]+:\s*([^\]]+)\]/);
+    const m      = header.match(/^### ([A-Z]+-\d+)\s+(.+?)\s+\[[^:]+:\s*([^\s|]+)\s*\|[^:]+:\s*([\d-]+)\s*\|[^:]+:\s*([^\]|]+)(?:\|[^:]+:\s*([^\]]+))?\]/);
 
+    const exm = header.match(/Expires:\s*(\d{4}-\d{2})/i);
     const entry = {
       id:       m?.[1]  || '?',
       title:    m?.[2]  || header.replace(/^###\s*/, '').trim(),
       strength: m?.[3]  || 'medium',
       updated:  m?.[4]  || '',
       source:   m?.[5]?.trim() || '',
+      expires:  exm?.[1] || '',
       content:  '',
       category: '',
       quote:    '',
@@ -103,10 +143,8 @@ function parseEntries(body) {
         if (qm) { entry.quote = qm[1].trim(); continue; }
       }
       if (!entry.content) {
-        // Bullet-point format: "- content text"
         const bulletM = line.match(/^\s*-\s+([^*\s].+)/);
         if (bulletM) { entry.content = bulletM[1].trim(); continue; }
-        // Plain text format (no leading dash, not a heading/hr/blank)
         if (line.trim() && !line.startsWith('#') && !line.startsWith('-') && !line.startsWith('*')) {
           entry.content = line.trim();
         }
@@ -117,6 +155,18 @@ function parseEntries(body) {
   }
 
   return entries;
+}
+
+// ─── Change History trimming ──────────────────────────────────────────────────
+
+function trimChangeHistory(raw) {
+  const m = raw.match(/(- \*\*Change History\*\*:\n)((?:  - .+\n?)+)/);
+  if (!m) return raw;
+  const lines = (m[2].match(/  - .+/g) || []);
+  if (lines.length <= MAX_HISTORY) return raw;
+  const dropped = lines.length - MAX_HISTORY;
+  const kept    = lines.slice(-MAX_HISTORY);
+  return raw.replace(m[0], `${m[1]}  - (${dropped} earlier entries consolidated)\n${kept.join('\n')}\n`);
 }
 
 // ─── Merge ────────────────────────────────────────────────────────────────────
@@ -130,28 +180,27 @@ function pickWinner(a, b) {
 }
 
 function mergeIntoWinner(winner, loser, sim) {
-  const pct      = Math.round(sim * 100);
+  const pct       = Math.round(sim * 100);
   const quoteNote = loser.quote ? ` Original Quote: "${loser.quote}"` : '';
-  const note      = `  - ${todayStr}: Auto-merged with ${loser.id} (${pct}% word overlap).${quoteNote}`;
+  const note      = `  - ${todayStr}: Auto-merged with ${loser.id} (${pct}% overlap).${quoteNote}`;
 
-  let raw = winner.raw;
-  raw = raw.replace(/\| Updated: [\d-]+/, `| Updated: ${todayStr}`);
+  let raw = winner.raw.replace(/\| Updated: [\d-]+/, () => `| Updated: ${todayStr}`);
 
   if (raw.includes('**Change History**')) {
-    // Append after the last history line
-    raw = raw.replace(/(- \*\*Change History\*\*:[\s\S]*?)(\n(?=###)|\s*$)/, `$1\n${note}$2`);
+    raw = raw.replace(/(- \*\*Change History\*\*:[\s\S]*?)(\n(?=###)|\s*$)/, (_, g1, g2) => `${g1}\n${note}${g2}`);
   } else {
     raw = raw.trimEnd() + `\n- **Change History**:\n${note}\n`;
   }
 
-  return { ...winner, updated: todayStr, raw };
+  return { ...winner, updated: todayStr, raw: trimChangeHistory(raw) };
 }
 
 // ─── Write entries back ───────────────────────────────────────────────────────
 
-function serializeEntries(front, entries) {
+function serializeEntries(front, preamble, entries) {
   const updatedFront = front.replace(/^(updated:\s*).+$/m, `$1${todayStr}`);
-  return updatedFront.trimEnd() + '\n\n' + entries.map(e => e.raw.trim()).join('\n\n') + '\n';
+  const entriesStr   = entries.map(e => e.raw.trim()).join('\n\n');
+  return updatedFront.trimEnd() + '\n' + (preamble || '\n') + entriesStr + (entriesStr ? '\n' : '');
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -165,29 +214,39 @@ for (const [dirName, domainName] of Object.entries(DOMAINS)) {
   const indexPath = path.join(MEMORY_PATH, 'domains', dirName, '_index.md');
   if (!fs.existsSync(indexPath)) continue;
 
-  const raw             = fs.readFileSync(indexPath, 'utf8');
-  const { front, body } = parseFrontmatter(raw);
+  const raw                      = fs.readFileSync(indexPath, 'utf8');
+  const { front, preamble, body } = parseFrontmatter(raw);
   let entries           = parseEntries(body);
   let modified          = false;
 
-  // ── 1. Archive low-strength stale entries ────────────────────────────────
+  // ── 1. Archive expired entries (Expires: YYYY-MM past current month) ─────
+  const expired = entries.filter(e => e.expires && e.expires < nowYYYYMM);
+  for (const e of expired) {
+    const dest = path.join(archiveDir, `${e.id}-expired-${todayStr}.md`);
+    fs.writeFileSync(dest, `# Archived (expired): ${e.id}\nArchived: ${todayStr}\nExpires: ${e.expires}\n\n---\n\n${e.raw}\n`, 'utf8');
+    report.archived.push(`${e.id} (${domainName}) — expired ${e.expires}`);
+    modified = true;
+  }
+  entries = entries.filter(e => !expired.includes(e));
+
+  // ── 2. Archive low-strength stale entries ────────────────────────────────
   const stale = entries.filter(e => e.strength === 'low' && daysSince(e.updated) > ARCHIVE_DAYS);
   for (const e of stale) {
     const dest = path.join(archiveDir, `${e.id}-${todayStr}.md`);
-    fs.writeFileSync(dest, `# Archived: ${e.id}\n\nArchived: ${todayStr}\nReason: strength=low, last updated ${e.updated} (${daysSince(e.updated)}d ago)\n\n---\n\n${e.raw}\n`, 'utf8');
+    fs.writeFileSync(dest, `# Archived: ${e.id}\nArchived: ${todayStr}\nReason: strength=low, last updated ${e.updated} (${daysSince(e.updated)}d ago)\n\n---\n\n${e.raw}\n`, 'utf8');
     report.archived.push(`${e.id} (${domainName}) — low strength, ${daysSince(e.updated)}d since ${e.updated}`);
     modified = true;
   }
   entries = entries.filter(e => !stale.includes(e));
 
-  // ── 2. Flag relative time ────────────────────────────────────────────────
+  // ── 3. Flag relative time ────────────────────────────────────────────────
   for (const e of entries) {
     if (RELATIVE_TIME.test(e.content) || RELATIVE_TIME.test(e.title)) {
       report.relTime.push(`${e.id} (${domainName}): "${(e.content || e.title).slice(0, 70)}"`);
     }
   }
 
-  // ── 3. Find merge candidates by category ─────────────────────────────────
+  // ── 4. Find merge candidates by category ─────────────────────────────────
   const byCategory = {};
   for (const e of entries) {
     const key = e.category.toLowerCase() || '__none__';
@@ -205,10 +264,10 @@ for (const [dirName, domainName] of Object.entries(DOMAINS)) {
       for (let j = i + 1; j < group.length; j++) {
         if (absorbed.has(group[j].id)) continue;
 
-        const sim = jaccardSimilarity(group[i].content, group[j].content);
+        const sim       = jaccardSimilarity(group[i].content, group[j].content);
+        const threshold = getMergeThreshold(group[i].content, group[j].content);
 
-        if (sim >= MERGE_THRESHOLD) {
-          // Deterministic: auto-merge
+        if (sim >= threshold) {
           const { winner, loser } = pickWinner(group[i], group[j]);
           const merged = mergeIntoWinner(winner, loser, sim);
           const idx = entries.findIndex(e => e.id === winner.id);
@@ -220,7 +279,6 @@ for (const [dirName, domainName] of Object.entries(DOMAINS)) {
           modified = true;
 
         } else if (sim >= REVIEW_LOW) {
-          // Edge case: flag for human review
           const label = cat === '__none__' ? 'no Category' : `"${cat}"`;
           report.review.push(
             `${group[i].id} vs ${group[j].id}  (${domainName} / ${label})  ${Math.round(sim * 100)}% overlap\n` +
@@ -234,7 +292,14 @@ for (const [dirName, domainName] of Object.entries(DOMAINS)) {
   }
 
   entries = entries.filter(e => !absorbed.has(e.id));
-  if (modified) fs.writeFileSync(indexPath, serializeEntries(front, entries), 'utf8');
+
+  // ── 5. Trim oversized Change History on all remaining entries ─────────────
+  for (const e of entries) {
+    const trimmed = trimChangeHistory(e.raw);
+    if (trimmed !== e.raw) { e.raw = trimmed; modified = true; }
+  }
+
+  if (modified) fs.writeFileSync(indexPath, serializeEntries(front, preamble, entries), 'utf8');
 }
 
 // ─── Consolidation log ────────────────────────────────────────────────────────
@@ -271,7 +336,6 @@ try { fs.appendFileSync(path.join(MEMORY_PATH, 'consolidation-log.md'), logLines
 const hasReview = report.review.length > 0 || report.relTime.length > 0;
 
 if (hasReview) {
-  // Print to stdout so Claude can read it as tool output
   const out = ['=== Consolidation Complete ===\n'];
   if (report.autoMerged.length) out.push(`Auto-merged: ${report.autoMerged.length} pairs`);
   if (report.archived.length)   out.push(`Archived:    ${report.archived.length} entries`);
